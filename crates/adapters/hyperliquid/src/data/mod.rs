@@ -64,10 +64,7 @@ use crate::{
     config::HyperliquidDataClientConfig,
     http::{
         client::HyperliquidHttpClient,
-        parse::{
-            HyperliquidInstrumentDef, HyperliquidMarketType, parse_perp_instruments,
-            parse_spot_instruments,
-        },
+        parse::{HyperliquidInstrumentDef, HyperliquidMarketType},
     },
     websocket::client::HyperliquidWebSocketClient,
 };
@@ -232,47 +229,24 @@ impl HyperliquidDataClient {
     async fn bootstrap_instruments(&mut self) -> Result<Vec<InstrumentAny>> {
         let mut instruments = Vec::new();
 
-        // Load perpetual instruments
-        match self.http_client.get_perp_meta().await {
-            Ok(perp_meta) => match parse_perp_instruments(&perp_meta) {
-                Ok(perp_defs) => {
-                    tracing::debug!("Loaded {} perp definitions", perp_defs.len());
-                    for def in perp_defs {
-                        if let Some(instrument) = create_instrument_from_def(&def) {
-                            instruments.push(instrument);
-                        }
+        match self.http_client.request_instruments().await {
+            Ok(defs) => {
+                tracing::debug!(
+                    count = defs.len(),
+                    "Received Hyperliquid instrument definitions"
+                );
+                for def in defs {
+                    if let Some(instrument) = create_instrument_from_def(&def) {
+                        instruments.push(instrument);
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to parse perp instruments: {}", e);
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Failed to load perp metadata: {}", e);
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Failed to request Hyperliquid instruments");
             }
         }
 
-        // Load spot instruments
-        match self.http_client.get_spot_meta().await {
-            Ok(spot_meta) => match parse_spot_instruments(&spot_meta) {
-                Ok(spot_defs) => {
-                    tracing::debug!("Loaded {} spot definitions", spot_defs.len());
-                    for def in spot_defs {
-                        if let Some(instrument) = create_instrument_from_def(&def) {
-                            instruments.push(instrument);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse spot instruments: {}", e);
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Failed to load spot metadata: {}", e);
-            }
-        }
-
-        tracing::info!("Loaded {} instruments from Hyperliquid", instruments.len());
+        tracing::info!(count = instruments.len(), "Loaded Hyperliquid instruments");
 
         // Update cache
         {

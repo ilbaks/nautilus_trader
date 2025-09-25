@@ -45,6 +45,7 @@ use crate::{
             HyperliquidExchangeRequest, HyperliquidExchangeResponse, HyperliquidFills,
             HyperliquidL2Book, HyperliquidMeta, HyperliquidOrderStatus,
         },
+        parse::{HyperliquidInstrumentDef, parse_perp_instruments, parse_spot_instruments},
         query::{ExchangeAction, InfoRequest},
         rate_limits::{
             RateLimitSnapshot, WeightedLimiter, backoff_full_jitter, exchange_weight,
@@ -213,6 +214,49 @@ impl HyperliquidHttpClient {
         let request = InfoRequest::spot_meta_and_asset_ctxs();
         let response = self.send_info_request(&request).await?;
         serde_json::from_value(response).map_err(Error::Serde)
+    }
+
+    /// Fetch and parse all available instrument definitions from Hyperliquid.
+    pub async fn request_instruments(&self) -> Result<Vec<HyperliquidInstrumentDef>> {
+        let mut defs = Vec::new();
+
+        match self.get_perp_meta().await {
+            Ok(perp_meta) => match parse_perp_instruments(&perp_meta) {
+                Ok(perp_defs) => {
+                    tracing::debug!(
+                        count = perp_defs.len(),
+                        "Loaded Hyperliquid perp definitions"
+                    );
+                    defs.extend(perp_defs);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to parse Hyperliquid perp instruments");
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%err, "Failed to load Hyperliquid perp metadata");
+            }
+        }
+
+        match self.get_spot_meta().await {
+            Ok(spot_meta) => match parse_spot_instruments(&spot_meta) {
+                Ok(spot_defs) => {
+                    tracing::debug!(
+                        count = spot_defs.len(),
+                        "Loaded Hyperliquid spot definitions"
+                    );
+                    defs.extend(spot_defs);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to parse Hyperliquid spot instruments");
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%err, "Failed to load Hyperliquid spot metadata");
+            }
+        }
+
+        Ok(defs)
     }
 
     /// Get L2 order book for a coin.

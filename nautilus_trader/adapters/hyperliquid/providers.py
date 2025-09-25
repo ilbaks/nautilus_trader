@@ -22,6 +22,8 @@ from typing import Any
 from nautilus_trader._libnautilus.hyperliquid import HyperliquidHttpClient
 from nautilus_trader._libnautilus.hyperliquid import HyperliquidInstrumentDef
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_VENUE
+from nautilus_trader.adapters.hyperliquid.enums import DEFAULT_PRODUCT_TYPES
+from nautilus_trader.adapters.hyperliquid.enums import HyperliquidProductType
 from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.core.correctness import PyCondition
@@ -45,18 +47,22 @@ class HyperliquidInstrumentProvider(InstrumentProvider):
         client: HyperliquidHttpClient,
         config: InstrumentProviderConfig | None = None,
         *,
-        include_spot: bool = True,
-        include_perp: bool = True,
+        product_types: Iterable[HyperliquidProductType] | None = None,
     ) -> None:
         PyCondition.not_none(client, "client")
         super().__init__(config=config or InstrumentProviderConfig())
 
-        if not include_spot and not include_perp:
-            raise ValueError("At least one of include_spot/include_perp must be True")
-
         self._client: HyperliquidHttpClient = client
-        self._include_spot = include_spot
-        self._include_perp = include_perp
+
+        resolved_types = (
+            DEFAULT_PRODUCT_TYPES
+            if product_types is None
+            else frozenset(HyperliquidProductType(pt) for pt in product_types)
+        )
+        if not resolved_types:
+            raise ValueError("product_types must contain at least one entry")
+
+        self._product_types = resolved_types
 
         self._definitions: dict[InstrumentId, HyperliquidInstrumentDef] = {}
 
@@ -79,49 +85,13 @@ class HyperliquidInstrumentProvider(InstrumentProvider):
 
         self._log.info("Loading Hyperliquid instrument definitions...")
 
-        try:
-            definitions = await self._client.load_instrument_definitions(
-                include_perp=self._include_perp,
-                include_spot=self._include_spot,
-            )
-        except AttributeError:  # method missing (old wheel?)
-            self._log.error("HyperliquidHttpClient is missing load_instrument_definitions")
-            raise
-        except Exception as exc:  # pragma: no cover - defensive logging
-            self._log.exception("Failed to fetch Hyperliquid instrument metadata", exc)
-            raise
+        definitions = await self._load_definitions()
 
         self._log.info("Parsing instrument definitions")
 
-        # Reset caches before repopulating
-        self._instruments.clear()
-        self._currencies.clear()
-        self._definitions.clear()
+        self._reset_definition_caches()
 
-        loaded = 0
-        skipped = 0
-
-        for definition in definitions:
-            if not definition.active:
-                skipped += 1
-                continue
-
-            if not self._accept_definition(definition, filters):
-                continue
-
-            try:
-                instrument = self._definition_to_instrument(definition)
-            except Exception as exc:  # pragma: no cover - defensive logging
-                self._log.exception(
-                    f"Failed to convert Hyperliquid def {definition.symbol} into instrument",
-                    exc,
-                )
-                skipped += 1
-                continue
-
-            self._definitions[instrument.id] = definition
-            self.add(instrument)
-            loaded += 1
+        loaded, skipped = self._ingest_definitions(definitions, filters)
 
         if loaded:
             self._log.info(f"Loaded {loaded} instruments for venue {HYPERLIQUID_VENUE.value}")
@@ -130,6 +100,85 @@ class HyperliquidInstrumentProvider(InstrumentProvider):
 
         if skipped:
             self._log.debug(f"Skipped {skipped} definitions (inactive or conversion failures)")
+
+    async def _load_definitions(self) -> list[HyperliquidInstrumentDef]:
+        try:
+            return await self._client.load_instrument_definitions(
+                include_perp=HyperliquidProductType.PERP in self._product_types,
+                include_spot=HyperliquidProductType.SPOT in self._product_types,
+            )
+        except AttributeError:  # method missing (old wheel?)
+            self._log.error("HyperliquidHttpClient is missing load_instrument_definitions")
+            raise
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._log.exception("Failed to fetch Hyperliquid instrument metadata", exc)
+            raise
+
+    def _reset_definition_caches(self) -> None:
+        self._instruments.clear()
+        self._currencies.clear()
+        self._definitions.clear()
+
+    def _ingest_definitions(
+        self,
+        definitions: Iterable[HyperliquidInstrumentDef],
+        filters: dict | None,
+    ) -> tuple[int, int]:
+        loaded = 0
+        skipped = 0
+
+        for definition in definitions:
+            product_type = self._normalize_product_type(definition)
+            if product_type is None:
+                skipped += 1
+                continue
+
+            if product_type not in self._product_types:
+                continue
+
+            if not definition.active:
+                skipped += 1
+                continue
+
+            if not self._accept_definition(definition, filters):
+                continue
+
+            instrument = self._safe_convert_definition(definition)
+            if instrument is None:
+                skipped += 1
+                continue
+
+            self._definitions[instrument.id] = definition
+            self.add(instrument)
+            loaded += 1
+
+        return loaded, skipped
+
+    def _normalize_product_type(
+        self,
+        definition: HyperliquidInstrumentDef,
+    ) -> HyperliquidProductType | None:
+        try:
+            return HyperliquidProductType(definition.market_type)
+        except ValueError:
+            self._log.warning(
+                "Ignoring Hyperliquid definition with unknown market type '%s'",
+                definition.market_type,
+            )
+            return None
+
+    def _safe_convert_definition(
+        self,
+        definition: HyperliquidInstrumentDef,
+    ) -> Instrument | None:
+        try:
+            return self._definition_to_instrument(definition)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._log.exception(
+                f"Failed to convert Hyperliquid def {definition.symbol} into instrument",
+                exc,
+            )
+            return None
 
     async def load_ids_async(
         self,

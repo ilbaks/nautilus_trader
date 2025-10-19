@@ -68,7 +68,7 @@ class FinamGrpcChannel:
             ('grpc.enable_retries', 1),
 
             # Connection timeout
-            ('grpc.initial_reconnect_backoff_ms', 1000),
+            # NOTE: grpc.initial_reconnect_backoff_ms removed - causes SSL handshake timeout
             ('grpc.max_reconnect_backoff_ms', 5000),
         ]
 

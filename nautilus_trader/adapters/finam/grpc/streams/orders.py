@@ -129,7 +129,6 @@ class OrderTradeStreamManager(BaseStreamManager):
                         except Exception as e:
                             self._logger.error(
                                 f"Error in OrderTrade callback: {e}",
-                                exc_info=True,
                             )
 
                     # Stream ended
@@ -171,7 +170,6 @@ class OrderTradeStreamManager(BaseStreamManager):
                 except Exception as e:
                     self._logger.error(
                         f"Unexpected error in OrderTrade stream: {e}",
-                        exc_info=True,
                     )
 
                     retry_count += 1

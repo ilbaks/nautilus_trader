@@ -14,11 +14,5 @@
 # -------------------------------------------------------------------------------------------------
 
 """
-Common constants for Finam adapter.
+Integration tests for the Finam adapter.
 """
-
-from nautilus_trader.model.identifiers import Venue
-
-
-# Default venue for Finam adapter
-FINAM_VENUE = Venue("FINAM")

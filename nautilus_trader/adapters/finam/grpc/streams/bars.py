@@ -17,11 +17,19 @@
 Bars stream manager for Finam gRPC API.
 """
 
+import asyncio
+from datetime import datetime
 from typing import Callable
+
+import grpc
+from google.protobuf.timestamp_pb2 import Timestamp
+from google.type.interval_pb2 import Interval
 
 from nautilus_trader.adapters.finam.grpc.client.client import FinamGrpcClient
 from nautilus_trader.adapters.finam.grpc.common.enums import TimeFrame
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.marketdata.marketdata_service_pb2 import (
+    BarsRequest,
+    BarsResponse,
     SubscribeBarsRequest,
     SubscribeBarsResponse,
 )
@@ -153,3 +161,253 @@ class BarsStreamManager(BaseStreamManager):
         stream_id = f"bars_{symbol}_{timeframe_name}"
         await self._stop_stream(stream_id)
         self._logger.info(f"Unsubscribed from Bars: {symbol} {timeframe_name}")
+
+    async def request_historical_bars(
+        self,
+        symbol: str,
+        timeframe: TimeFrame,
+        start_time: datetime,
+        end_time: datetime,
+        max_retries: int = 3,
+        chunk_days: int = 7,
+    ) -> list:
+        """
+        Request historical bars for a specific time range.
+
+        This is a unary RPC call (not streaming) that fetches a batch
+        of historical OHLCV bars from the server.
+
+        **IMPORTANT: Finam API Limits**
+        - For intraday timeframes (M1, M5, H1, etc.): max 30 days per request
+        - This method automatically chunks large requests into smaller periods
+
+        Parameters
+        ----------
+        symbol : str
+            The instrument symbol (e.g., "SiZ5@RTSX")
+        timeframe : TimeFrame
+            The bar timeframe (M1, M5, H1, D, etc.)
+        start_time : datetime
+            Start of the time range (timezone-aware recommended)
+        end_time : datetime
+            End of the time range (timezone-aware recommended)
+        max_retries : int
+            Maximum number of retry attempts on failure (default: 3)
+        chunk_days : int
+            Size of chunks in days for splitting large requests (default: 7)
+            Set to 0 to disable chunking (not recommended for >30 days)
+
+        Returns
+        -------
+        list
+            List of Bar protobuf messages
+
+        Raises
+        ------
+        grpc.RpcError
+            If the request fails after all retries
+        ValueError
+            If start_time >= end_time or parameters invalid
+
+        Examples
+        --------
+        >>> from datetime import datetime, timedelta, timezone
+        >>> manager = BarsStreamManager(client, logger)
+        >>>
+        >>> # Request 1 week of M1 bars
+        >>> end = datetime.now(timezone.utc)
+        >>> start = end - timedelta(days=7)
+        >>> bars = await manager.request_historical_bars(
+        ...     symbol="SiZ5@RTSX",
+        ...     timeframe=TimeFrame.M1,
+        ...     start_time=start,
+        ...     end_time=end,
+        ... )
+        >>> print(f"Loaded {len(bars)} bars")
+        >>>
+        >>> # Request 90 days (auto-chunked into 7-day periods)
+        >>> start = end - timedelta(days=90)
+        >>> bars = await manager.request_historical_bars(
+        ...     symbol="SiZ5@RTSX",
+        ...     timeframe=TimeFrame.M1,
+        ...     start_time=start,
+        ...     end_time=end,
+        ... )
+        >>> print(f"Loaded {len(bars)} bars")
+        """
+        # Validation
+        if start_time >= end_time:
+            raise ValueError(
+                f"start_time ({start_time}) must be before end_time ({end_time})"
+            )
+
+        # Calculate total period
+        total_period = end_time - start_time
+        total_days = total_period.total_seconds() / 86400  # Convert to days
+
+        # Check if chunking is needed
+        if chunk_days > 0 and total_days > chunk_days:
+            self._logger.info(
+                f"Chunking request: {total_days:.1f} days split into {chunk_days}-day chunks"
+            )
+            return await self._request_historical_bars_chunked(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_time=start_time,
+                end_time=end_time,
+                chunk_days=chunk_days,
+                max_retries=max_retries,
+            )
+
+        # Single request (no chunking)
+        return await self._request_single_chunk(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            max_retries=max_retries,
+        )
+
+    async def _request_historical_bars_chunked(
+        self,
+        symbol: str,
+        timeframe: TimeFrame,
+        start_time: datetime,
+        end_time: datetime,
+        chunk_days: int,
+        max_retries: int,
+    ) -> list:
+        """
+        Request historical bars in chunks to handle large date ranges.
+
+        Splits the request into smaller time periods and combines results.
+        """
+        from datetime import timedelta
+
+        all_bars = []
+        current_start = start_time
+        chunk_delta = timedelta(days=chunk_days)
+        chunk_number = 0
+
+        while current_start < end_time:
+            chunk_number += 1
+            # Calculate chunk end (but not beyond final end_time)
+            current_end = min(current_start + chunk_delta, end_time)
+
+            self._logger.info(
+                f"📦 Chunk {chunk_number}: {symbol} {timeframe.name} "
+                f"from {current_start.strftime('%Y-%m-%d')} "
+                f"to {current_end.strftime('%Y-%m-%d')}"
+            )
+
+            # Request chunk
+            try:
+                chunk_bars = await self._request_single_chunk(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_time=current_start,
+                    end_time=current_end,
+                    max_retries=max_retries,
+                )
+
+                all_bars.extend(chunk_bars)
+                self._logger.info(
+                    f"   ✅ Loaded {len(chunk_bars)} bars (total: {len(all_bars)})"
+                )
+
+            except grpc.RpcError as e:
+                self._logger.error(
+                    f"   ❌ Failed to load chunk {chunk_number}: {e}"
+                )
+                # Continue with next chunk instead of failing completely
+                # This allows partial data recovery
+
+            # Move to next chunk
+            current_start = current_end
+
+            # Small delay between chunks to respect rate limits
+            if current_start < end_time:
+                await asyncio.sleep(0.5)
+
+        self._logger.info(
+            f"✅ Chunked request complete: {len(all_bars)} total bars for {symbol}"
+        )
+        return all_bars
+
+    async def _request_single_chunk(
+        self,
+        symbol: str,
+        timeframe: TimeFrame,
+        start_time: datetime,
+        end_time: datetime,
+        max_retries: int,
+    ) -> list:
+        """
+        Request a single chunk of historical bars (internal method).
+
+        This method handles a single API call for a time range.
+        """
+        self._logger.debug(
+            f"Requesting bars: {symbol} {timeframe.name} "
+            f"from {start_time} to {end_time}"
+        )
+
+        # Create Interval (google.type.Interval)
+        interval = Interval()
+
+        # Convert datetime to Timestamp
+        start_ts = Timestamp()
+        start_ts.FromDatetime(start_time)
+        interval.start_time.CopyFrom(start_ts)
+
+        end_ts = Timestamp()
+        end_ts.FromDatetime(end_time)
+        interval.end_time.CopyFrom(end_ts)
+
+        # Create request
+        request = BarsRequest(
+            symbol=symbol,
+            timeframe=timeframe.value,  # Protobuf enum value
+            interval=interval,
+        )
+
+        # Execute request with retries
+        for attempt in range(max_retries):
+            try:
+                # Get metadata (authorization)
+                metadata = await self._client.get_metadata()
+
+                # Apply rate limiting
+                await self._client.rate_limiter.acquire()
+
+                # Make unary call
+                response: BarsResponse = await self._client.marketdata.Bars(
+                    request,
+                    metadata=metadata,
+                )
+
+                # Log success
+                bar_count = len(response.bars)
+                self._logger.debug(
+                    f"Successfully loaded {bar_count} bars for {symbol} "
+                    f"{timeframe.name}"
+                )
+
+                return list(response.bars)
+
+            except grpc.RpcError as e:
+                self._logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed for {symbol}: {e}"
+                )
+
+                if attempt == max_retries - 1:
+                    # Last attempt failed
+                    self._logger.error(
+                        f"Failed to load historical bars after {max_retries} attempts"
+                    )
+                    raise
+
+                # Exponential backoff
+                await asyncio.sleep(2 ** attempt)
+
+        return []  # Should never reach here due to raise above

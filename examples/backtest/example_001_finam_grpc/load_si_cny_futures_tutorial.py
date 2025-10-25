@@ -110,7 +110,8 @@ ACCOUNT_ID = int(ACCOUNT_ID_STR)
 logger.info(f"✅ Учетные данные загружены для аккаунта: {ACCOUNT_ID}")
 
 # Константы
-CATALOG_PATH = Path(__file__).parent / "si_cny_futures_catalog"
+# CATALOG_PATH = Path(__file__).parent / "si_cny_futures_catalog"
+CATALOG_PATH = Path("/workspace/alphamax/data/00_datacatalog/NAUTILUS_CATALOG")
 VENUE_FINAM = Venue("FINAM")
 
 # %% [markdown]
@@ -141,9 +142,9 @@ FUTURES_CONTRACTS = {
         # {"symbol": "SiU4@RTSX", "name": "Si сентябрь 2024", "start": "2023-03-19", "expiry": "2024-09-19"},
         # {"symbol": "SiZ4@RTSX", "name": "Si декабрь 2024", "start": "2023-06-19", "expiry": "2024-12-19"},
         # # 2025-2027 - активно торгуются
-        {"symbol": "SiH5@RTSX", "name": "Si март 2025", "start": "2023-09-20", "expiry": "2025-03-20"},
-        {"symbol": "SiM5@RTSX", "name": "Si июнь 2025", "start": "2023-12-19", "expiry": "2025-06-19"},
-        {"symbol": "SiU5@RTSX", "name": "Si сентябрь 2025", "start": "2024-03-18", "expiry": "2025-09-18"},
+        # {"symbol": "SiH5@RTSX", "name": "Si март 2025", "start": "2023-09-20", "expiry": "2025-03-20"},
+        # {"symbol": "SiM5@RTSX", "name": "Si июнь 2025", "start": "2023-12-19", "expiry": "2025-06-19"},
+        # {"symbol": "SiU5@RTSX", "name": "Si сентябрь 2025", "start": "2024-03-18", "expiry": "2025-09-18"},
         {"symbol": "SiZ5@RTSX", "name": "Si декабрь 2025", "start": "2024-06-18", "expiry": "2025-12-18"},
         # {"symbol": "SiH6@RTSX", "name": "Si март 2026", "start": "2024-09-19", "expiry": "2026-03-19"},
         # {"symbol": "SiM6@RTSX", "name": "Si июнь 2026", "start": "2024-12-18", "expiry": "2026-06-18"},

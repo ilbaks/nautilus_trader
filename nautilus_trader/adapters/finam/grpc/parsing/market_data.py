@@ -253,7 +253,18 @@ def parse_bar_response(
         high_price = Price.from_str(_decimal_to_str(bar.high))
         low_price = Price.from_str(_decimal_to_str(bar.low))
         close_price = Price.from_str(_decimal_to_str(bar.close))
-        volume = Quantity.from_str(_decimal_to_str(bar.volume))
+
+        # Нормализуем volume: убираем .0 если значение целое
+        # Finam API отправляет объемы в формате "1.0", "2.0" вместо "1", "2"
+        # Это приводит к precision=1, но FuturesContract требует precision=0
+        volume_str = _decimal_to_str(bar.volume)
+        if '.' in volume_str:
+            volume_float = float(volume_str)
+            volume_int = int(volume_float)
+            if volume_float == volume_int:
+                volume_str = str(volume_int)  # "1.0" → "1", "2.0" → "2"
+        volume = Quantity.from_str(volume_str)
+
         ts_event = _timestamp_to_nanos(bar.timestamp) if bar.HasField("timestamp") else ts_init
 
         nautilus_bar = Bar(

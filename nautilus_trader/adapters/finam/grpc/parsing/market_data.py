@@ -283,6 +283,93 @@ def parse_bar_response(
     return bars
 
 
+def parse_historical_bar(
+    proto_bar,
+    instrument_id: InstrumentId,
+    bar_type: BarType,
+    ts_init: int,
+) -> Bar:
+    """
+    Parse a single Finam protobuf Bar (from historical data request) to Nautilus Bar.
+
+    This function is specifically designed for parsing individual bars returned from
+    historical data requests (BarsStreamManager.request_historical_bars), as opposed
+    to parse_bar_response which handles streaming SubscribeBarsResponse.
+
+    Parameters
+    ----------
+    proto_bar
+        Single protobuf Bar message from historical data request.
+    instrument_id : InstrumentId
+        The Nautilus instrument ID.
+    bar_type : BarType
+        The Nautilus bar type (includes specification and aggregation source).
+    ts_init : int
+        The initialization timestamp in nanoseconds (for monotonic ordering).
+
+    Returns
+    -------
+    Bar
+        The parsed Nautilus Bar object.
+
+    Examples
+    --------
+    >>> from nautilus_trader.adapters.finam.grpc.parsing.market_data import parse_historical_bar
+    >>> from nautilus_trader.common.component import LiveClock
+    >>>
+    >>> clock = LiveClock()
+    >>> proto_bars = await stream.request_historical_bars(...)
+    >>>
+    >>> nautilus_bars = []
+    >>> for proto_bar in proto_bars:
+    ...     bar = parse_historical_bar(
+    ...         proto_bar=proto_bar,
+    ...         instrument_id=instrument_id,
+    ...         bar_type=bar_type,
+    ...         ts_init=clock.timestamp_ns(),
+    ...     )
+    ...     nautilus_bars.append(bar)
+
+    Notes
+    -----
+    - This function eliminates the need for creating mock SubscribeBarsResponse objects
+    - Handles volume normalization (removes .0 suffix for integer volumes)
+    - Uses proto_bar.timestamp for ts_event if available, otherwise falls back to ts_init
+
+    """
+    # Parse OHLC prices from protobuf Decimal fields
+    open_price = Price.from_str(_decimal_to_str(proto_bar.open))
+    high_price = Price.from_str(_decimal_to_str(proto_bar.high))
+    low_price = Price.from_str(_decimal_to_str(proto_bar.low))
+    close_price = Price.from_str(_decimal_to_str(proto_bar.close))
+
+    # Normalize volume: remove .0 suffix if value is integer
+    # Finam API sends volumes as "1.0", "2.0" instead of "1", "2"
+    # This causes precision=1, but FuturesContract requires precision=0
+    volume_str = _decimal_to_str(proto_bar.volume)
+    if '.' in volume_str:
+        volume_float = float(volume_str)
+        volume_int = int(volume_float)
+        if volume_float == volume_int:
+            volume_str = str(volume_int)  # "1.0" → "1", "2.0" → "2"
+    volume = Quantity.from_str(volume_str)
+
+    # Extract event timestamp from protobuf, fall back to ts_init if not present
+    ts_event = _timestamp_to_nanos(proto_bar.timestamp) if proto_bar.HasField("timestamp") else ts_init
+
+    # Create Nautilus Bar object
+    return Bar(
+        bar_type=bar_type,
+        open=open_price,
+        high=high_price,
+        low=low_price,
+        close=close_price,
+        volume=volume,
+        ts_event=ts_event,
+        ts_init=ts_init,
+    )
+
+
 def parse_quote_response(
     response: SubscribeQuoteResponse,
     instrument_id: InstrumentId,

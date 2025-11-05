@@ -216,9 +216,53 @@ class HistoricFinamClient:
             f"instrument_ids={len(instrument_ids or [])})"
         )
 
-        # TODO: Implement instrument loading logic
-        # For now, return empty list (will be implemented in Phase 2.3)
-        raise NotImplementedError("request_instruments() not yet implemented")
+        # Build list of InstrumentId objects from contracts/instrument_ids
+        venue = Venue("FINAM")
+        ids_to_load: list[InstrumentId] = []
+
+        # Process contracts
+        if contracts:
+            for contract in contracts:
+                if not isinstance(contract, dict):
+                    self.log.warning(f"Skipping invalid contract (not dict): {contract}")
+                    continue
+
+                if "symbol" not in contract:
+                    self.log.warning(f"Skipping contract without 'symbol': {contract}")
+                    continue
+
+                symbol_str = contract["symbol"]
+                # Convert Finam format (SiZ5@RTSX) to Nautilus format (SiZ5-RTSX)
+                nautilus_symbol = symbol_str.replace("@", "-")
+                instrument_id = InstrumentId(Symbol(nautilus_symbol), venue)
+                ids_to_load.append(instrument_id)
+
+        # Process instrument_ids
+        if instrument_ids:
+            for id_str in instrument_ids:
+                try:
+                    # Parse instrument ID string (e.g., "SiZ5-RTSX.FINAM")
+                    instrument_id = InstrumentId.from_str(id_str)
+                    ids_to_load.append(instrument_id)
+                except Exception as e:
+                    self.log.warning(f"Failed to parse instrument_id '{id_str}': {e}")
+                    continue
+
+        if not ids_to_load:
+            self.log.warning("No valid instrument IDs to load")
+            return []
+
+        self.log.info(f"Loading {len(ids_to_load)} instruments from Finam API...")
+
+        # Load instruments using FinamInstrumentProvider.load_ids_async()
+        await self._instrument_provider.load_ids_async(instrument_ids=ids_to_load)
+
+        # Return all loaded instruments
+        result = self._instrument_provider.list_all()
+
+        self.log.info(f"✅ Loaded {len(result)} instruments")
+
+        return result
 
     async def request_bars(
         self,

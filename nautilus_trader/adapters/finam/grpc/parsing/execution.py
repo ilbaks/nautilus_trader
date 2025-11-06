@@ -22,6 +22,7 @@ Converts Finam gRPC Protobuf messages → Nautilus domain objects for execution 
 from decimal import Decimal
 
 from google.protobuf.timestamp_pb2 import Timestamp
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.accounts.accounts_service_pb2 import (
     GetAccountResponse,
     Position as FinamPosition,
@@ -115,7 +116,7 @@ def _decimal_to_quantity(decimal: Decimal, precision: int = 8) -> Quantity:
 def _decimal_to_price(decimal: Decimal, precision: int = 8) -> Price:
     """Convert Protobuf Decimal to Nautilus Price."""
     value_str = _decimal_to_str(decimal)
-    return Price.from_str(value_str) if value_str != "0" else Price.zero(precision)
+    return Price.from_str(value_str) if value_str != "0" else Price.from_str("0")
 
 
 def _parse_side(side: FinamSide) -> OrderSide:
@@ -379,6 +380,18 @@ def parse_account_response(
         )
         balances.append(balance)
 
+    # Ensure at least one balance exists (required by AccountState)
+    if not balances:
+        # Create zero RUB balance for accounts with only margin data
+        currency = Currency.from_str("RUB")
+        balances.append(
+            AccountBalance(
+                total=Money(0, currency),
+                locked=Money(0, currency),
+                free=Money(0, currency),
+            )
+        )
+
     # Parse margin balance (if available)
     margins = []
     if response.HasField('portfolio_mc'):
@@ -417,15 +430,15 @@ def parse_account_response(
         reported=True,
         balances=balances,
         margins=margins,
-        is_reported=True,
-        ts_event=ts_event,
-        ts_init=ts_init,
         info={
             "type": response.type,
             "status": response.status,
             "equity": _decimal_to_str(response.equity),
             "unrealized_profit": _decimal_to_str(response.unrealized_profit),
         },
+        event_id=UUID4(),
+        ts_event=ts_event,
+        ts_init=ts_init,
     )
 
 

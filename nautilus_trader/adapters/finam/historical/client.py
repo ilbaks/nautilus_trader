@@ -482,7 +482,18 @@ class HistoricFinamClient:
 
                     # Parse protobuf bars to Nautilus Bar objects
                     for proto_bar in proto_bars:
-                        ts_init = self._clock.timestamp_ns()
+                        # ✅ FIX: For historical data, ts_init should equal ts_event (not current time)
+                        # This ensures backtest reports show historical timestamps instead of data loading time
+                        from nautilus_trader.core.datetime import secs_to_nanos
+
+                        if proto_bar.HasField("timestamp"):
+                            # Extract ts_event from protobuf timestamp
+                            ts_event = secs_to_nanos(proto_bar.timestamp.seconds) + proto_bar.timestamp.nanos
+                            ts_init = ts_event  # For historical data: ts_init = ts_event
+                        else:
+                            # Fallback to current time if timestamp not available
+                            ts_init = self._clock.timestamp_ns()
+
                         bar = parse_historical_bar(
                             proto_bar=proto_bar,
                             instrument_id=instrument_id,

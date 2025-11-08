@@ -130,7 +130,9 @@ def parse_instrument(
         # TODO: Extract expiration_ns from ticker (e.g., "S0H6" -> March 2026)
         # For now, use placeholder values
         import time
-        activation_ns = ts_init
+        # ✅ FIX: Set activation_ns = 0 for historical data (makes contract always active)
+        # Using ts_init would set it to "now", making contracts inactive during backtest
+        activation_ns = 0
         expiration_ns = ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days
 
         return FuturesContract(
@@ -179,7 +181,8 @@ def parse_instrument(
     elif asset_type == FinamInstrumentType.SPREADS.value:
         # TODO: Parse spread legs from ticker (e.g., "RAZ5RAH6" -> Dec25/Mar26)
         import time
-        activation_ns = ts_init
+        # ✅ FIX: Set activation_ns = 0 for historical data (makes contract always active)
+        activation_ns = 0
         expiration_ns = ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days
 
         # Extract exchange from symbol (after @)

@@ -220,10 +220,45 @@ def parse_trade_response(
     return ticks
 
 
+def _price_from_decimal_str(decimal_str: str, price_precision: int) -> Price:
+    """
+    Convert Finam Decimal string to Nautilus Price with specified precision.
+
+    Finam may return prices with variable precision (e.g., "100.5" has precision=1),
+    but instruments require fixed precision (e.g., precision=2). This function
+    normalizes the price to match the instrument's precision.
+
+    Parameters
+    ----------
+    decimal_str : str
+        The decimal string from Finam API (e.g., "100.5", "100.50")
+    price_precision : int
+        The required precision for the instrument (e.g., 2 for 0.01 increments)
+
+    Returns
+    -------
+    Price
+        Nautilus Price object with the specified precision
+
+    Examples
+    --------
+    >>> _price_from_decimal_str("100.5", 2)
+    Price('100.50')  # precision=2
+    >>> _price_from_decimal_str("100.5", 1)
+    Price('100.5')   # precision=1
+
+    """
+    price_float = float(decimal_str)
+    # Use Price constructor with precision instead of from_raw()
+    # Nautilus uses internal fixed-point scaling (10^16), not 10^precision
+    return Price(price_float, precision=price_precision)
+
+
 def parse_bar_response(
     response: SubscribeBarsResponse,
     instrument_id: InstrumentId,
     bar_type: BarType,
+    price_precision: int,
     ts_init: int,
 ) -> list[Bar]:
     """
@@ -237,6 +272,8 @@ def parse_bar_response(
         The instrument ID
     bar_type : BarType
         The bar type
+    price_precision : int
+        The price precision for the instrument (number of decimal places)
     ts_init : int
         The initialization timestamp (nanoseconds)
 
@@ -249,10 +286,11 @@ def parse_bar_response(
     bars = []
 
     for bar in response.bars:
-        open_price = Price.from_str(_decimal_to_str(bar.open))
-        high_price = Price.from_str(_decimal_to_str(bar.high))
-        low_price = Price.from_str(_decimal_to_str(bar.low))
-        close_price = Price.from_str(_decimal_to_str(bar.close))
+        # Use price_precision to create normalized Price objects
+        open_price = _price_from_decimal_str(_decimal_to_str(bar.open), price_precision)
+        high_price = _price_from_decimal_str(_decimal_to_str(bar.high), price_precision)
+        low_price = _price_from_decimal_str(_decimal_to_str(bar.low), price_precision)
+        close_price = _price_from_decimal_str(_decimal_to_str(bar.close), price_precision)
 
         # Нормализуем volume: убираем .0 если значение целое
         # Finam API отправляет объемы в формате "1.0", "2.0" вместо "1", "2"
@@ -287,6 +325,7 @@ def parse_historical_bar(
     proto_bar,
     instrument_id: InstrumentId,
     bar_type: BarType,
+    price_precision: int,
     ts_init: int,
 ) -> Bar:
     """
@@ -304,6 +343,8 @@ def parse_historical_bar(
         The Nautilus instrument ID.
     bar_type : BarType
         The Nautilus bar type (includes specification and aggregation source).
+    price_precision : int
+        The price precision for the instrument (number of decimal places).
     ts_init : int
         The initialization timestamp in nanoseconds (for monotonic ordering).
 
@@ -326,6 +367,7 @@ def parse_historical_bar(
     ...         proto_bar=proto_bar,
     ...         instrument_id=instrument_id,
     ...         bar_type=bar_type,
+    ...         price_precision=2,  # From instrument.price_precision
     ...         ts_init=clock.timestamp_ns(),
     ...     )
     ...     nautilus_bars.append(bar)
@@ -335,13 +377,14 @@ def parse_historical_bar(
     - This function eliminates the need for creating mock SubscribeBarsResponse objects
     - Handles volume normalization (removes .0 suffix for integer volumes)
     - Uses proto_bar.timestamp for ts_event if available, otherwise falls back to ts_init
+    - Normalizes price precision to match instrument requirements (Issue #003 fix)
 
     """
-    # Parse OHLC prices from protobuf Decimal fields
-    open_price = Price.from_str(_decimal_to_str(proto_bar.open))
-    high_price = Price.from_str(_decimal_to_str(proto_bar.high))
-    low_price = Price.from_str(_decimal_to_str(proto_bar.low))
-    close_price = Price.from_str(_decimal_to_str(proto_bar.close))
+    # Parse OHLC prices from protobuf Decimal fields with normalized precision
+    open_price = _price_from_decimal_str(_decimal_to_str(proto_bar.open), price_precision)
+    high_price = _price_from_decimal_str(_decimal_to_str(proto_bar.high), price_precision)
+    low_price = _price_from_decimal_str(_decimal_to_str(proto_bar.low), price_precision)
+    close_price = _price_from_decimal_str(_decimal_to_str(proto_bar.close), price_precision)
 
     # Normalize volume: remove .0 suffix if value is integer
     # Finam API sends volumes as "1.0", "2.0" instead of "1", "2"

@@ -354,8 +354,18 @@ class FinamDataClient(LiveMarketDataClient):
         def callback(response: Any) -> None:
             """Handle bar updates from gRPC stream."""
             try:
+                # Get price_precision from cached instrument
+                instrument = self._cache.instrument(instrument_id)
+                if instrument is None:
+                    self._log.error(
+                        f"Instrument {instrument_id} not found in cache. "
+                        f"Cannot parse bars without price precision."
+                    )
+                    return
+
+                price_precision = instrument.price_precision
                 ts_init = self._clock.timestamp_ns()
-                bars = parse_bar_response(response, instrument_id, bar_type, ts_init)
+                bars = parse_bar_response(response, instrument_id, bar_type, price_precision, ts_init)
                 for bar in bars:
                     self._handle_data(bar)
             except Exception as e:

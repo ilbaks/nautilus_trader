@@ -41,8 +41,65 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.instruments import FuturesContract
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+
+
+def _normalize_instrument_id(instrument: Instrument) -> Instrument:
+    """
+    Create a copy of instrument with normalized ID (@ → -).
+
+    Nautilus automatically converts @ → - in bar_type when saving to catalog,
+    so instruments should also use `-` for consistency.
+
+    Parameters
+    ----------
+    instrument : Instrument
+        Original instrument (may contain @ in symbol)
+
+    Returns
+    -------
+    Instrument
+        New instrument with normalized symbol (with -)
+    """
+    # Only normalize FuturesContract (other instrument types handled as needed)
+    if not isinstance(instrument, FuturesContract):
+        return instrument
+
+    # Normalize symbol and raw_symbol: @ → -
+    normalized_symbol_str = str(instrument.id.symbol).replace("@", "-")
+    normalized_symbol = Symbol(normalized_symbol_str)
+
+    normalized_raw_symbol_str = str(instrument.raw_symbol).replace("@", "-")
+    normalized_raw_symbol = Symbol(normalized_raw_symbol_str)
+
+    # Create new InstrumentId with normalized symbol
+    normalized_id = InstrumentId(symbol=normalized_symbol, venue=instrument.id.venue)
+
+    # Create new FuturesContract with normalized ID
+    return FuturesContract(
+        instrument_id=normalized_id,
+        raw_symbol=normalized_raw_symbol,
+        asset_class=instrument.asset_class,
+        currency=instrument.quote_currency,
+        price_precision=instrument.price_precision,
+        price_increment=instrument.price_increment,
+        multiplier=instrument.multiplier,
+        lot_size=instrument.lot_size,
+        underlying=instrument.underlying,
+        activation_ns=instrument.activation_ns,
+        expiration_ns=instrument.expiration_ns,
+        ts_event=instrument.ts_event,
+        ts_init=instrument.ts_init,
+        margin_init=instrument.margin_init,
+        margin_maint=instrument.margin_maint,
+        maker_fee=instrument.maker_fee if hasattr(instrument, 'maker_fee') else None,
+        taker_fee=instrument.taker_fee if hasattr(instrument, 'taker_fee') else None,
+        exchange=instrument.exchange if hasattr(instrument, 'exchange') else None,
+        tick_scheme_name=instrument.tick_scheme_name if hasattr(instrument, 'tick_scheme_name') else None,
+        info=instrument.info if hasattr(instrument, 'info') else None,
+    )
 
 
 class HistoricFinamClient:
@@ -124,6 +181,9 @@ class HistoricFinamClient:
 
         # Instrument provider (will be initialized after connect)
         self._instrument_provider: FinamInstrumentProvider | None = None
+
+        # Cache for normalized instruments (@ → -)
+        self._normalized_instruments_cache: dict[str, Instrument] = {}
 
         self.log.info(
             f"HistoricFinamClient initialized (client_id={client_id}, log_level={log_level})"
@@ -232,9 +292,8 @@ class HistoricFinamClient:
                     continue
 
                 symbol_str = contract["symbol"]
-                # Convert Finam format (SiZ5@RTSX) to Nautilus format (SiZ5-RTSX)
-                nautilus_symbol = symbol_str.replace("@", "-")
-                instrument_id = InstrumentId(Symbol(nautilus_symbol), venue)
+                # Keep original symbol with @ for provider lookup
+                instrument_id = InstrumentId(Symbol(symbol_str), venue)
                 ids_to_load.append(instrument_id)
 
         # Process instrument_ids
@@ -257,12 +316,23 @@ class HistoricFinamClient:
         # Load instruments using FinamInstrumentProvider.load_ids_async()
         await self._instrument_provider.load_ids_async(instrument_ids=ids_to_load)
 
-        # Return all loaded instruments
-        result = self._instrument_provider.list_all()
+        # Get all loaded instruments
+        instruments = self._instrument_provider.list_all()
+        self.log.info(f"Provider returned {len(instruments)} instruments with IDs: {[str(i.id) for i in instruments]}")
 
-        self.log.info(f"✅ Loaded {len(result)} instruments")
+        # Normalize instrument IDs (@ → -) for catalog consistency
+        normalized_instruments = [_normalize_instrument_id(inst) for inst in instruments]
+        self.log.info(f"Normalized to: {[str(i.id) for i in normalized_instruments]}")
 
-        return result
+        # Cache normalized instruments for later use in request_bars()
+        for norm_inst in normalized_instruments:
+            cache_key = str(norm_inst.id)
+            self._normalized_instruments_cache[cache_key] = norm_inst
+            self.log.debug(f"Cached instrument: {cache_key}")
+
+        self.log.info(f"✅ Loaded {len(normalized_instruments)} instruments")
+
+        return normalized_instruments
 
     async def request_bars(
         self,
@@ -396,6 +466,20 @@ class HistoricFinamClient:
                         f"Received {len(proto_bars)} protobuf bars for {symbol_str} {bar_spec_str}"
                     )
 
+                    # Get price_precision from cached normalized instrument
+                    # IMPORTANT: Instrument must be loaded first via request_instruments()
+                    cache_key = str(instrument_id)
+                    normalized_instrument = self._normalized_instruments_cache.get(cache_key)
+
+                    if normalized_instrument is None:
+                        self.log.error(
+                            f"Instrument {instrument_id} not found in cache. "
+                            f"Call request_instruments() first to load metadata."
+                        )
+                        continue
+
+                    price_precision = normalized_instrument.price_precision
+
                     # Parse protobuf bars to Nautilus Bar objects
                     for proto_bar in proto_bars:
                         ts_init = self._clock.timestamp_ns()
@@ -403,6 +487,7 @@ class HistoricFinamClient:
                             proto_bar=proto_bar,
                             instrument_id=instrument_id,
                             bar_type=bar_type,
+                            price_precision=price_precision,
                             ts_init=ts_init,
                         )
                         all_bars.append(bar)

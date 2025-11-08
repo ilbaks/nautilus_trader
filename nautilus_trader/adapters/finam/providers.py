@@ -123,6 +123,14 @@ class FinamInstrumentProvider(InstrumentProvider):
         -----
         Currently loads ALL instruments and filters locally.
         In future: could use GET /asset?symbol={symbol} fro individual  loading.
+
+        Symbol Format Handling
+        ----------------------
+        Supports both Nautilus format (with -) and Finam API format (with @):
+        - Nautilus: "SiZ5-RTSX.FINAM"
+        - Finam API: "SiZ5@RTSX"
+
+        When filtering, we normalize symbols to support both formats.
         """
         PyCondition.not_none(instrument_ids, "instrument_ids")
         PyCondition.not_empty(instrument_ids, "instrument_ids")
@@ -134,14 +142,23 @@ class FinamInstrumentProvider(InstrumentProvider):
         await self.load_all_async(filters)
 
         # Фильтруем только запрошенные IDs
+        # ВАЖНО: Поддерживаем оба формата символов (@ и -)
+        # API возвращает "SiZ5@RTSX", мы запрашиваем "SiZ5-RTSX"
         requested_symbols = {instrument_id.symbol.value for instrument_id in instrument_ids}
+
+        # Создаем set со всеми вариантами символов (@ и -)
+        requested_symbols_normalized = set()
+        for symbol in requested_symbols:
+            requested_symbols_normalized.add(symbol)  # Оригинальный формат
+            requested_symbols_normalized.add(symbol.replace("-", "@"))  # Nautilus → Finam
+            requested_symbols_normalized.add(symbol.replace("@", "-"))  # Finam → Nautilus
 
         # Удаляем незапрошенные инструменты
         all_ids = list(self._instruments.keys())
         for instrument_id in all_ids:
-            if instrument_id.symbol.value not in requested_symbols:
+            if instrument_id.symbol.value not in requested_symbols_normalized:
                 del self._instruments[instrument_id]
- 
+
         self._log.info(f"Loaded {self.count} instruments (filtered)")
 
     async def load_async(

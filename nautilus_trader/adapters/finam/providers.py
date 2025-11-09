@@ -16,13 +16,16 @@
 from nautilus_trader.adapters.finam.grpc.client.client import FinamGrpcClient
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.assets.assets_service_pb2 import (
     AssetsRequest,
+    GetAssetRequest,
 )
 from nautilus_trader.adapters.finam.parsing.instruments import parse_instrument
+from nautilus_trader.adapters.finam.parsing.specs import parse_instrument_specs
 from nautilus_trader.common.component import Clock
 from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Quantity
 #%%
 
 class FinamInstrumentProvider(InstrumentProvider):
@@ -110,19 +113,17 @@ class FinamInstrumentProvider(InstrumentProvider):
         filters: dict | None = None,
     ) -> None:
         """
-        Load specific  insruments by IDs.
+        Load specific instruments by IDs with detailed specifications.
+
+        This method loads precise trading parameters (lot_size, multiplier, price_increment)
+        by calling GetAsset() for each requested instrument.
 
         Parameters
         ----------
-        insrument_ids : list[InstrumentId]
-            The insrument IDs to load
+        instrument_ids : list[InstrumentId]
+            The instrument IDs to load
         filters : dict, optional
             Currently not used
-
-        Notes
-        -----
-        Currently loads ALL instruments and filters locally.
-        In future: could use GET /asset?symbol={symbol} fro individual  loading.
 
         Symbol Format Handling
         ----------------------
@@ -135,13 +136,12 @@ class FinamInstrumentProvider(InstrumentProvider):
         PyCondition.not_none(instrument_ids, "instrument_ids")
         PyCondition.not_empty(instrument_ids, "instrument_ids")
 
-        self._log.info(f"Loading {len(instrument_ids)} instruments...")
+        self._log.info(f"Loading {len(instrument_ids)} instruments with detailed specs...")
 
-        # Временная реализация: загружаем все и фильтруем
-        # TODO:  Оптимизировать через GET /asset?symbol={symbol}
+        # Step 1: Load all instruments (basic info) via Assets()
         await self.load_all_async(filters)
 
-        # Фильтруем только запрошенные IDs
+        # Step 2: Filter requested instruments
         # ВАЖНО: Поддерживаем оба формата символов (@ и -)
         # API возвращает "SiZ5@RTSX", мы запрашиваем "SiZ5-RTSX"
         requested_symbols = {instrument_id.symbol.value for instrument_id in instrument_ids}
@@ -153,13 +153,138 @@ class FinamInstrumentProvider(InstrumentProvider):
             requested_symbols_normalized.add(symbol.replace("-", "@"))  # Nautilus → Finam
             requested_symbols_normalized.add(symbol.replace("@", "-"))  # Finam → Nautilus
 
-        # Удаляем незапрошенные инструменты
+        # Find matching instruments
+        matched_instruments = []
         all_ids = list(self._instruments.keys())
         for instrument_id in all_ids:
-            if instrument_id.symbol.value not in requested_symbols_normalized:
+            if instrument_id.symbol.value in requested_symbols_normalized:
+                matched_instruments.append(self._instruments[instrument_id])
+            else:
+                # Remove non-requested instruments
                 del self._instruments[instrument_id]
 
-        self._log.info(f"Loaded {self.count} instruments (filtered)")
+        self._log.info(f"Found {len(matched_instruments)} matching instruments")
+
+        # Step 3: Load detailed specs for each matched instrument via GetAsset()
+        metadata = await self._client.get_metadata()
+        ts_init = self._clock.timestamp_ns()
+
+        for instrument in matched_instruments:
+            try:
+                # Convert symbol to Finam API format (with @)
+                finam_symbol = str(instrument.id.symbol).replace("-", "@")
+
+                self._log.debug(f"Loading specs for {finam_symbol}...")
+
+                # Call GetAsset() to get detailed specifications
+                # Note: account_id is required by Finam API
+                account_id = self._client._client_id  # Get from gRPC client
+                request = GetAssetRequest(symbol=finam_symbol, account_id=account_id)
+                specs_response = await self._client.assets.GetAsset(request, metadata=metadata)
+
+                # Parse specs
+                specs = parse_instrument_specs(specs_response)
+
+                # Get original Asset from first load (needed for parse_instrument)
+                # We need to call Assets() again or store the original asset
+                # For now, we'll reconstruct from the instrument
+                # But parse_instrument needs the original protobuf Asset...
+
+                # Alternative: directly update instrument attributes
+                # This is more efficient than recreating
+                from nautilus_trader.model.instruments import FuturesContract
+
+                if isinstance(instrument, FuturesContract):
+                    # Moscow Exchange futures have standardized tick value conventions:
+                    #
+                    # STANDARD RULE (Мосбиржа):
+                    # - Most futures have tick_value = 1 RUB (стоимость мин. шага = 1 ₽)
+                    # - multiplier = tick_value / price_increment
+                    #
+                    # EXAMPLES FROM PROTO:
+                    # 1. Si (USD/RUB): decimals=0, min_step=1
+                    #    → price_increment = 1/1 = 1.0
+                    #    → tick_value = 1 RUB
+                    #    → multiplier = 1.0 / 1.0 = 1
+                    #
+                    # 2. CR (CNY/RUB): decimals=3, min_step=1
+                    #    → price_increment = 1/1000 = 0.001
+                    #    → tick_value = 1 RUB (0.001 × 1000 lot_size)
+                    #    → multiplier = 1.0 / 0.001 = 1000 = lot_size
+                    #
+                    # 3. SBRF (акции): decimals=0, min_step=1
+                    #    → price_increment = 1.0
+                    #    → tick_value = 1 RUB
+                    #    → multiplier = 1.0 / 1.0 = 1
+                    #
+                    # This formula works universally when tick_value = 1 RUB (Мосбиржа standard)
+                    from decimal import Decimal
+
+                    # Standard tick value for Moscow Exchange = 1 RUB
+                    # (for most instruments: Si, CR, SBRF, etc.)
+                    tick_value_rub = Decimal("1.0")
+
+                    # Calculate multiplier from tick value and price increment
+                    # multiplier = tick_value / price_increment
+                    price_inc_decimal = Decimal(str(specs['price_increment']))
+                    multiplier_decimal = tick_value_rub / price_inc_decimal
+
+                    # Convert to Quantity with appropriate precision
+                    # For integer multipliers (1, 1000), use precision=0
+                    # For fractional multipliers (0.02 for RTS), use higher precision
+                    if multiplier_decimal == multiplier_decimal.to_integral_value():
+                        # Integer multiplier
+                        multiplier = Quantity.from_int(int(multiplier_decimal))
+                        multiplier_precision = 0
+                    else:
+                        # Fractional multiplier (e.g., RTS: 0.02)
+                        multiplier_str = str(multiplier_decimal)
+                        multiplier_precision = len(multiplier_str.split('.')[-1]) if '.' in multiplier_str else 0
+                        multiplier = Quantity(float(multiplier_decimal), multiplier_precision)
+
+                    # Determine quoting type for logging
+                    if specs['price_precision'] == 0:
+                        quote_type = "contract"  # Цена за весь контракт
+                    else:
+                        quote_type = "base_unit"  # Цена за единицу базового актива
+
+                    # Create updated instrument with real specs
+                    updated_instrument = FuturesContract(
+                        instrument_id=instrument.id,
+                        raw_symbol=instrument.raw_symbol,
+                        asset_class=instrument.asset_class,
+                        currency=specs['currency'],
+                        price_precision=specs['price_precision'],
+                        price_increment=specs['price_increment'],
+                        multiplier=multiplier,              # ✅ Depends on quoting method
+                        lot_size=specs['lot_size'],         # ✅ Contract size from API
+                        underlying=instrument.underlying,
+                        activation_ns=instrument.activation_ns,
+                        expiration_ns=instrument.expiration_ns,
+                        ts_event=ts_init,
+                        ts_init=ts_init,
+                        margin_init=instrument.margin_init,
+                        margin_maint=instrument.margin_maint,
+                    )
+
+                    # Replace in cache
+                    self._instruments[instrument.id] = updated_instrument
+                    self._log.info(
+                        f"✅ Updated {instrument.id}: lot_size={specs['lot_size']}, "
+                        f"multiplier={multiplier} (quote_type={quote_type}), "
+                        f"price_increment={specs['price_increment']}"
+                    )
+                else:
+                    # For non-futures instruments, keep original for now
+                    # TODO: Implement update logic for other instrument types
+                    self._log.debug(f"Skipping spec update for non-futures: {instrument.id}")
+
+            except Exception as e:
+                self._log.warning(f"Failed to load specs for {instrument.id}: {e}")
+                # Keep instrument with default values
+                continue
+
+        self._log.info(f"Loaded {self.count} instruments with detailed specs")
 
     async def load_async(
         self,

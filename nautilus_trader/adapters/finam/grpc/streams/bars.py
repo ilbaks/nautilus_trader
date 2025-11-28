@@ -393,7 +393,19 @@ class BarsStreamManager(BaseStreamManager):
                     f"{timeframe.name}"
                 )
 
-                return list(response.bars)
+                # ✅ FIX: Deep-copy protobuf bars to avoid use-after-free
+                # When response goes out of scope, the underlying C++ protobuf buffer
+                # may be freed. Accessing bar fields later causes segfault.
+                # Solution: Copy each bar to break the reference to parent buffer.
+                from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.marketdata.marketdata_service_pb2 import (
+                    Bar as BarMessage,
+                )
+                copied_bars = []
+                for bar in response.bars:
+                    new_bar = BarMessage()
+                    new_bar.CopyFrom(bar)
+                    copied_bars.append(new_bar)
+                return copied_bars
 
             except grpc.RpcError as e:
                 self._logger.warning(

@@ -185,6 +185,17 @@ class FinamInstrumentProvider(InstrumentProvider):
                 # Parse specs
                 specs = parse_instrument_specs(specs_response)
 
+                # Extract expiration_ns from specs (for futures)
+                # Finam API returns expiration_date in GetAssetResponse
+                expiration_ns = instrument.expiration_ns  # fallback to original (+90 days)
+                if specs.get('expiration_date'):
+                    from datetime import timezone
+                    expiry_dt = specs['expiration_date'].replace(tzinfo=timezone.utc)
+                    expiration_ns = int(expiry_dt.timestamp() * 1_000_000_000)
+                    self._log.info(f"   📅 Using API expiration: {specs['expiration_date'].date()}")
+                else:
+                    self._log.warning(f"   ⚠️ No expiration_date from API, using fallback (+90 days)")
+
                 # Get original Asset from first load (needed for parse_instrument)
                 # We need to call Assets() again or store the original asset
                 # For now, we'll reconstruct from the instrument
@@ -260,7 +271,7 @@ class FinamInstrumentProvider(InstrumentProvider):
                         lot_size=specs['lot_size'],         # ✅ Contract size from API
                         underlying=instrument.underlying,
                         activation_ns=instrument.activation_ns,
-                        expiration_ns=instrument.expiration_ns,
+                        expiration_ns=expiration_ns,        # ✅ FIX: Real date from API
                         ts_event=ts_init,
                         ts_init=ts_init,
                         margin_init=instrument.margin_init,

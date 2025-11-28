@@ -38,8 +38,10 @@ from nautilus_trader.model.objects import Quantity
 #%%
 def parse_instrument(
         finam_asset: Asset,
-        ts_init:int,
+        ts_init: int,
         specs: dict | None = None,
+        expiration_ns: int | None = None,
+        activation_ns: int | None = None,
 ) -> Instrument:
     """
     Parse Finam Protobuf Asset to Nautilus Instrument.
@@ -66,6 +68,13 @@ def parse_instrument(
         Optional parsed specifications from GetAssetResponse.
         If provided, uses real values. If None, uses defaults.
         Get via: parse_instrument_specs(get_asset_response)
+    expiration_ns : int | None
+        Optional expiration timestamp in nanoseconds for futures/spreads.
+        If provided, overrides the default +90 days calculation.
+        Use this when you have the real expiration date from external source.
+    activation_ns : int | None
+        Optional activation timestamp in nanoseconds for futures/spreads.
+        If provided, overrides the default (0 for historical data).
 
     Returns
     -------
@@ -81,6 +90,10 @@ def parse_instrument(
     specs_response = await client.assets.GetAsset(...)
     specs = parse_instrument_specs(specs_response)
     instrument = parse_instrument(asset, ts_init, specs)
+
+    # Stage 3: With explicit expiration date
+    expiration_ns = int(expiry_datetime.timestamp() * 1_000_000_000)
+    instrument = parse_instrument(asset, ts_init, specs, expiration_ns=expiration_ns)
     """
     PyCondition.not_none(finam_asset, "finam_asset")
 
@@ -127,13 +140,13 @@ def parse_instrument(
         )
 
     elif asset_type == FinamInstrumentType.FUTURES.value:
-        # TODO: Extract expiration_ns from ticker (e.g., "S0H6" -> March 2026)
-        # For now, use placeholder values
-        import time
-        # ✅ FIX: Set activation_ns = 0 for historical data (makes contract always active)
-        # Using ts_init would set it to "now", making contracts inactive during backtest
-        activation_ns = 0
-        expiration_ns = ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days
+        # Use provided values or calculate defaults
+        # activation_ns: 0 for historical data (makes contract always active)
+        # expiration_ns: use provided value or fallback to +90 days
+        actual_activation_ns = activation_ns if activation_ns is not None else 0
+        actual_expiration_ns = expiration_ns if expiration_ns is not None else (
+            ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days fallback
+        )
 
         return FuturesContract(
             instrument_id=instrument_id,
@@ -145,8 +158,8 @@ def parse_instrument(
             multiplier=lot_size,
             lot_size=lot_size,
             underlying=finam_asset.ticker,  # Use ticker as underlying
-            activation_ns=activation_ns,
-            expiration_ns=expiration_ns,
+            activation_ns=actual_activation_ns,
+            expiration_ns=actual_expiration_ns,
             ts_event=ts_init,
             ts_init=ts_init,
         )
@@ -179,11 +192,13 @@ def parse_instrument(
         )
 
     elif asset_type == FinamInstrumentType.SPREADS.value:
-        # TODO: Parse spread legs from ticker (e.g., "RAZ5RAH6" -> Dec25/Mar26)
-        import time
-        # ✅ FIX: Set activation_ns = 0 for historical data (makes contract always active)
-        activation_ns = 0
-        expiration_ns = ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days
+        # Use provided values or calculate defaults
+        # activation_ns: 0 for historical data (makes contract always active)
+        # expiration_ns: use provided value or fallback to +90 days
+        actual_activation_ns = activation_ns if activation_ns is not None else 0
+        actual_expiration_ns = expiration_ns if expiration_ns is not None else (
+            ts_init + (90 * 24 * 60 * 60 * 1_000_000_000)  # +90 days fallback
+        )
 
         # Extract exchange from symbol (after @)
         exchange = finam_asset.mic if hasattr(finam_asset, 'mic') else "RTSX"
@@ -195,8 +210,8 @@ def parse_instrument(
             exchange=exchange,
             underlying=finam_asset.ticker,
             strategy_type="CALENDAR",  # Calendar spread (different expirations)
-            activation_ns=activation_ns,
-            expiration_ns=expiration_ns,
+            activation_ns=actual_activation_ns,
+            expiration_ns=actual_expiration_ns,
             currency=currency,
             price_precision=price_precision,
             price_increment=price_increment,

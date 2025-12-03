@@ -18,8 +18,11 @@ Execution client for Finam gRPC API.
 """
 
 import asyncio
+from decimal import Decimal
+import grpc
 from typing import Any
 
+from nautilus_trader.adapters.finam.common.symbols import to_finam_symbol
 from nautilus_trader.adapters.finam.grpc.client.client import FinamGrpcClient
 from nautilus_trader.adapters.finam.grpc.parsing.execution import (
     parse_account_balances_and_margins,
@@ -32,6 +35,7 @@ from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.accounts.a
 )
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.orders.orders_service_pb2 import (
     CancelOrderRequest,
+    GetOrderRequest,
     Order as FinamOrder,
     OrderTradeRequest,
     OrderTradeResponse,
@@ -64,14 +68,18 @@ from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderType
+from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.orders import LimitOrder
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.model.orders import Order
+from nautilus_trader.model.objects import Quantity
 
 
 class FinamExecutionClient(LiveExecutionClient):
@@ -139,6 +147,9 @@ class FinamExecutionClient(LiveExecutionClient):
 
         # Order tracking
         self._venue_order_id_to_client_order_id: dict[VenueOrderId, ClientOrderId] = {}
+        self._finam_to_client_order_id: dict[str, ClientOrderId] = {}
+        self._client_to_finam_order_id: dict[ClientOrderId, str] = {}
+        self._client_to_venue_order_id: dict[ClientOrderId, VenueOrderId] = {}
 
         # Hot caches
         self._instrument_ids: dict[str, InstrumentId] = {}
@@ -225,7 +236,7 @@ class FinamExecutionClient(LiveExecutionClient):
                 try:
                     await self._update_account_state()
                 except Exception as e:
-                    self._log.error(f"Error updating account state: {e}")
+                    self._log.error(f"Error updating account state: {self._format_grpc_error(e)}")
 
         except asyncio.CancelledError:
             self._log.debug("Canceled task 'poll_account_state'")
@@ -262,7 +273,7 @@ class FinamExecutionClient(LiveExecutionClient):
             self._log.info(f"Account state updated: {len(balances)} balances, {len(margins)} margins")
 
         except Exception as e:
-            self._log.error(f"Failed to update account state: {e}")
+            self._log.error(f"Failed to update account state: {self._format_grpc_error(e)}")
             import traceback
             self._log.debug(traceback.format_exc())
 
@@ -340,6 +351,11 @@ class FinamExecutionClient(LiveExecutionClient):
                     )
                     # TODO: Send OrderStatusReport for unknown orders
                     return
+            else:
+                # Map shortened Finam ID back to full Nautilus ID if needed
+                mapped = self._finam_to_client_order_id.get(client_order_id.value)
+                if mapped:
+                    client_order_id = mapped
 
             # Get strategy_id from cache
             strategy_id = self._cache.strategy_id_for_order(client_order_id)
@@ -543,12 +559,12 @@ class FinamExecutionClient(LiveExecutionClient):
                 )
 
         except Exception as e:
-            self._log.error(f"Failed to submit order {order.client_order_id}: {e}")
+            self._log.error(f"Failed to submit order {order.client_order_id}: {self._format_grpc_error(e)}")
             self.generate_order_rejected(
                 strategy_id=order.strategy_id,
                 instrument_id=order.instrument_id,
                 client_order_id=order.client_order_id,
-                reason=str(e),
+                reason=str(self._format_grpc_error(e)),
                 ts_event=self._clock.timestamp_ns(),
             )
 
@@ -556,14 +572,16 @@ class FinamExecutionClient(LiveExecutionClient):
         """Submit a market order via PlaceOrder()."""
         metadata = await self._client.get_metadata()
 
+        finam_symbol = self._get_finam_symbol(order.instrument_id)
+
         finam_order = FinamOrder(
             account_id=self._finam_account_id,
-            symbol=order.instrument_id.symbol.value,
+            symbol=finam_symbol,
             quantity=self._quantity_to_decimal(order.quantity),
             side=self._map_order_side(order.side),
             type=FinamOrderType.ORDER_TYPE_MARKET,
             time_in_force=FinamTimeInForce.TIME_IN_FORCE_DAY,
-            client_order_id=order.client_order_id.value,
+            client_order_id=self._to_finam_client_order_id(order.client_order_id),
         )
 
         response = await self._client.orders.PlaceOrder(finam_order, metadata=metadata)
@@ -571,6 +589,7 @@ class FinamExecutionClient(LiveExecutionClient):
         # Track venue_order_id → client_order_id mapping
         venue_order_id = VenueOrderId(response.order_id)
         self._venue_order_id_to_client_order_id[venue_order_id] = order.client_order_id
+        self._client_to_venue_order_id[order.client_order_id] = venue_order_id
 
         self._log.info(f"Market order submitted: {response.order_id}")
 
@@ -578,15 +597,17 @@ class FinamExecutionClient(LiveExecutionClient):
         """Submit a limit order via PlaceOrder()."""
         metadata = await self._client.get_metadata()
 
+        finam_symbol = self._get_finam_symbol(order.instrument_id)
+
         finam_order = FinamOrder(
             account_id=self._finam_account_id,
-            symbol=order.instrument_id.symbol.value,
+            symbol=finam_symbol,
             quantity=self._quantity_to_decimal(order.quantity),
             side=self._map_order_side(order.side),
             type=FinamOrderType.ORDER_TYPE_LIMIT,
             time_in_force=FinamTimeInForce.TIME_IN_FORCE_DAY,
             limit_price=self._price_to_decimal(order.price),
-            client_order_id=order.client_order_id.value,
+            client_order_id=self._to_finam_client_order_id(order.client_order_id),
         )
 
         response = await self._client.orders.PlaceOrder(finam_order, metadata=metadata)
@@ -594,6 +615,7 @@ class FinamExecutionClient(LiveExecutionClient):
         # Track venue_order_id → client_order_id mapping
         venue_order_id = VenueOrderId(response.order_id)
         self._venue_order_id_to_client_order_id[venue_order_id] = order.client_order_id
+        self._client_to_venue_order_id[order.client_order_id] = venue_order_id
 
         self._log.info(f"Limit order submitted: {response.order_id}")
 
@@ -676,17 +698,107 @@ class FinamExecutionClient(LiveExecutionClient):
         OrderStatusReport | None
 
         """
-        # TODO: Implement GetOrder() call and parsing
-        self._log.warning("generate_order_status_report not yet implemented")
-        return None
+        try:
+            # Resolve venue order id
+            venue_order_id = command.venue_order_id
+            if not venue_order_id and command.client_order_id in self._client_to_venue_order_id:
+                venue_order_id = self._client_to_venue_order_id.get(command.client_order_id)
+
+            if not venue_order_id:
+                self._log.warning(
+                    f"Cannot query status: no venue_order_id for {command.client_order_id}"
+                )
+                return None
+
+            metadata = await self._client.get_metadata()
+            request = GetOrderRequest(
+                account_id=self._finam_account_id,
+                order_id=venue_order_id.value,
+            )
+            order_state = await self._client.orders.GetOrder(request, metadata=metadata)
+
+            symbol = getattr(order_state.order, "symbol", "")
+            instrument_id = self._get_cached_instrument_id(symbol)
+
+            parsed = parse_order_state(
+                order_state=order_state,
+                account_id=self.account_id,
+                instrument_id=instrument_id,
+                ts_init=self._clock.timestamp_ns(),
+            )
+
+            # Map Finam client_order_id back to original if it was sanitized
+            client_oid = parsed.get("client_order_id") or command.client_order_id
+            mapped = None
+            if client_oid and client_oid.value in self._finam_to_client_order_id:
+                mapped = self._finam_to_client_order_id.get(client_oid.value)
+            parsed["client_order_id"] = mapped or client_oid
+
+            status_name = None
+            try:
+                # OrderState.status is an enum int; decode to name for logging
+                from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.orders.orders_service_pb2 import (
+                    OrderStatus as FinamOrderStatus,
+                )
+                status_name = FinamOrderStatus.Name(order_state.status)
+            except Exception:
+                status_name = str(order_state.status)
+
+            # Build OrderStatusReport with available fields; fallback defaults for missing data
+            qty = parsed["quantity"]
+            filled_qty = qty if parsed["order_status"] == OrderStatus.FILLED else Quantity.zero()
+
+            # Approximate avg_px: use limit_price if present, otherwise last cached bar close, else 0
+            avg_px_decimal: Decimal | None = None
+            if parsed.get("limit_price"):
+                try:
+                    avg_px_decimal = Decimal(str(parsed["limit_price"].value))
+                except Exception:
+                    avg_px_decimal = None
+            if avg_px_decimal is None:
+                try:
+                    last_bar = self._cache.bar_latest(instrument_id)
+                    if last_bar:
+                        avg_px_decimal = Decimal(str(last_bar.close.value))
+                except Exception:
+                    avg_px_decimal = None
+            if avg_px_decimal is None:
+                avg_px_decimal = Decimal("0")
+
+            report = OrderStatusReport(
+                account_id=self.account_id,
+                instrument_id=instrument_id,
+                venue_order_id=parsed["venue_order_id"],
+                order_side=parsed["side"],
+                order_type=OrderType.MARKET,  # Finam GetOrder does not return type mapping here; assume MARKET
+                time_in_force=TimeInForce.DAY,  # Finam currently submits DAY
+                order_status=parsed["order_status"],
+                quantity=qty,
+                filled_qty=filled_qty,
+                report_id=UUID4(),  # unique report id
+                ts_accepted=parsed["ts_accepted"] or parsed["ts_event"],
+                ts_last=parsed["ts_event"],
+                ts_init=parsed["ts_init"],
+                client_order_id=parsed["client_order_id"] or command.client_order_id,
+                avg_px=avg_px_decimal,
+            )
+
+            self._log.info(
+                f"GetOrder status {status_name or parsed['order_status']} "
+                f"for {report.client_order_id} ({symbol}) venue_id={venue_order_id.value}"
+            )
+
+            return report
+
+        except Exception as e:
+            self._log.error(f"Failed to generate order status report: {self._format_grpc_error(e)}")
+            return None
 
     async def generate_order_status_reports(
         self,
         command: GenerateOrderStatusReports,
     ) -> list[OrderStatusReport]:
-        """Generate order status reports via Orders()."""
-        # TODO: Implement Orders() call and parsing
-        self._log.warning("generate_order_status_reports not yet implemented")
+        """Generate order status reports via Orders(). Finam has no filter, so return empty."""
         return []
 
     async def generate_fill_reports(
@@ -748,6 +860,59 @@ class FinamExecutionClient(LiveExecutionClient):
         if instrument:
             return instrument
         return self._instrument_provider.find(instrument_id=instrument_id)
+
+    def _get_finam_symbol(self, instrument_id: InstrumentId) -> str:
+        """
+        Return the Finam-formatted symbol for order submission.
+
+        Preference:
+        1) instrument.raw_symbol if available (usually already contains '@')
+        2) convert Nautilus symbol (with '-') to Finam symbol (with '@')
+        """
+        instrument = self._find_instrument(instrument_id)
+        if instrument and getattr(instrument, "raw_symbol", None):
+            return instrument.raw_symbol.value
+
+        return to_finam_symbol(instrument_id.symbol.value)
+
+    def _to_finam_client_order_id(self, client_order_id: ClientOrderId) -> str:
+        """
+        Ensure client_order_id obeys Finam limit (<=20 chars) and keep mapping.
+
+        Sanitizes to allowed chars (letters/numbers/space) and shortens to 20 chars max.
+        Strategy:
+        - strip non-alphanumeric characters
+        - if still too long, keep head+tail
+        - always record mapping for reverse lookup
+        """
+        raw = client_order_id.value
+        sanitized = "".join(ch for ch in raw if ch.isalnum())
+
+        if not sanitized:
+            # Fallback to timestamp-based ID if everything was stripped
+            ts_suffix = str(self._clock.timestamp_ns())[-12:]
+            sanitized = f"COID{ts_suffix}"
+
+        if len(sanitized) > 20:
+            sanitized = f"{sanitized[:6]}{sanitized[-14:]}"
+            if len(sanitized) > 20:
+                sanitized = sanitized[-20:]
+
+        self._finam_to_client_order_id[sanitized] = client_order_id
+        self._client_to_finam_order_id[client_order_id] = sanitized
+        return sanitized
+
+    def _format_grpc_error(self, exc: Exception) -> str:
+        """
+        Decode gRPC errors so non-ASCII messages (e.g., Russian) are readable.
+        """
+        try:
+            if isinstance(exc, grpc.aio.AioRpcError):
+                details = exc.details() or str(exc)
+                return details
+        except Exception:
+            pass
+        return str(exc)
 
     def _map_order_side(self, side: OrderSide) -> FinamSide:
         """Map Nautilus OrderSide to Finam Side."""

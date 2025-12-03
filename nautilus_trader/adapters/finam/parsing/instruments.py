@@ -16,6 +16,7 @@
 from decimal import Decimal
 
 from nautilus_trader.adapters.finam.common.constants import FINAM_VENUE
+from nautilus_trader.adapters.finam.common.symbols import to_nautilus_symbol
 from nautilus_trader.adapters.finam.common.enums import FinamInstrumentType
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.assets.assets_service_pb2 import (
     Asset,
@@ -97,11 +98,11 @@ def parse_instrument(
     """
     PyCondition.not_none(finam_asset, "finam_asset")
 
+    raw_symbol = Symbol(finam_asset.symbol)
     instrument_id = InstrumentId(
-        symbol=Symbol(finam_asset.symbol),
+        symbol=Symbol(to_nautilus_symbol(finam_asset.symbol)),
         venue=FINAM_VENUE,
     )
-    raw_symbol = Symbol(finam_asset.symbol)
 
     # Use specs if provided, otherwise use defaults
     from decimal import Decimal

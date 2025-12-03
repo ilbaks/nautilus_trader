@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 #%%
+from nautilus_trader.adapters.finam.common.symbols import to_finam_symbol
 from nautilus_trader.adapters.finam.grpc.client.client import FinamGrpcClient
 from nautilus_trader.adapters.finam.grpc.proto.finam_grpc.tradeapi.v1.assets.assets_service_pb2 import (
     AssetsRequest,
@@ -178,7 +179,10 @@ class FinamInstrumentProvider(InstrumentProvider):
         for instrument in matched_instruments:
             try:
                 # Convert symbol to Finam API format (with @)
-                finam_symbol = str(instrument.id.symbol).replace("-", "@")
+                if hasattr(instrument, "raw_symbol") and instrument.raw_symbol is not None:
+                    finam_symbol = instrument.raw_symbol.value
+                else:
+                    finam_symbol = to_finam_symbol(str(instrument.id.symbol))
 
                 self._log.debug(f"Loading specs for {finam_symbol}...")
 
@@ -193,7 +197,7 @@ class FinamInstrumentProvider(InstrumentProvider):
 
                 # Extract expiration_ns from specs (for futures)
                 # Finam API returns expiration_date in GetAssetResponse
-                expiration_ns = instrument.expiration_ns  # fallback to original (+90 days)
+                expiration_ns = getattr(instrument, "expiration_ns", None)  # futures only; equity has no expiration
                 if specs.get('expiration_date'):
                     from datetime import timezone
                     expiry_dt = specs['expiration_date'].replace(tzinfo=timezone.utc)

@@ -83,6 +83,7 @@ FINAM_TO_NAUTILUS_ORDER_STATUS = {
     FinamOrderStatus.ORDER_STATUS_FAILED: OrderStatus.REJECTED,
     FinamOrderStatus.ORDER_STATUS_DENIED_BY_BROKER: OrderStatus.REJECTED,
     FinamOrderStatus.ORDER_STATUS_REJECTED_BY_EXCHANGE: OrderStatus.REJECTED,
+    14: OrderStatus.REJECTED,  # Unknown Finam status code observed in GetOrder
 }
 
 FINAM_SIDE_TO_NAUTILUS = {
@@ -126,7 +127,8 @@ def _parse_side(side: FinamSide) -> OrderSide:
 
 def _parse_order_status(status: FinamOrderStatus) -> OrderStatus:
     """Parse Finam OrderStatus → Nautilus OrderStatus."""
-    return FINAM_TO_NAUTILUS_ORDER_STATUS.get(status, OrderStatus.PENDING_UPDATE)
+    # Default to REJECTED for unknown codes to avoid false positives (e.g., FILLED)
+    return FINAM_TO_NAUTILUS_ORDER_STATUS.get(status, OrderStatus.REJECTED)
 
 
 # =================================================================================================

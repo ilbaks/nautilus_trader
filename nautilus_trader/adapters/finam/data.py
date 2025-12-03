@@ -20,6 +20,7 @@ Provides a data client for the Finam exchange using gRPC API.
 import asyncio
 from typing import Any
 
+from nautilus_trader.adapters.finam.common.symbols import to_finam_symbol
 from nautilus_trader.adapters.finam.grpc.client.client import FinamGrpcClient
 from nautilus_trader.adapters.finam.grpc.common.enums import TimeFrame
 from nautilus_trader.adapters.finam.grpc.parsing.market_data import (
@@ -346,7 +347,10 @@ class FinamDataClient(LiveMarketDataClient):
             The subscription command.
 
         """
-        instrument_id: InstrumentId = command.instrument_id
+        instrument_id: InstrumentId | None = command.instrument_id or command.bar_type.instrument_id
+        if instrument_id is None:
+            self._log.error("SubscribeBars missing instrument_id; skipping subscription")
+            return
         symbol: str = self._get_finam_symbol(instrument_id)
         bar_type = command.bar_type
 
@@ -380,8 +384,8 @@ class FinamDataClient(LiveMarketDataClient):
                     exc_info=True,
                 )
 
-        await self._bars_stream.subscribe_bars(symbol, timeframe.name, callback)
-        self._log.info(f"Subscribed to bars: {symbol} {timeframe}", LogColor.BLUE)
+        await self._bars_stream.subscribe_bars(symbol, timeframe, callback)
+        self._log.info(f"Subscribed to bars: {symbol} {timeframe.name}", LogColor.BLUE)
 
     async def _unsubscribe_bars(self, command: UnsubscribeBars) -> None:
         """
@@ -393,7 +397,12 @@ class FinamDataClient(LiveMarketDataClient):
             The unsubscription command.
 
         """
-        symbol: str = self._get_finam_symbol(command.instrument_id)
+        instrument_id: InstrumentId | None = command.instrument_id or command.bar_type.instrument_id
+        if instrument_id is None:
+            self._log.error("UnsubscribeBars missing instrument_id; skipping unsubscription")
+            return
+
+        symbol: str = self._get_finam_symbol(instrument_id)
         bar_type = command.bar_type
 
         # Convert Nautilus BarSpec to Finam TimeFrame
@@ -403,8 +412,8 @@ class FinamDataClient(LiveMarketDataClient):
             self._log.error(f"Cannot unsubscribe from bars for {symbol}: {e}")
             return
 
-        await self._bars_stream.unsubscribe_bars(symbol, timeframe.name)
-        self._log.info(f"Unsubscribed from bars: {symbol} {timeframe}")
+        await self._bars_stream.unsubscribe_bars(symbol, timeframe)
+        self._log.info(f"Unsubscribed from bars: {symbol} {timeframe.name}")
 
     # -- HELPER METHODS ---------------------------------------------------------------------------
 
@@ -429,9 +438,7 @@ class FinamDataClient(LiveMarketDataClient):
         # InstrumentId format: "SBER@MISX.FINAM"
         # Finam API expects: "SBER@MISX"
         symbol_str = instrument_id.symbol.value
-        if ".FINAM" in symbol_str:
-            return symbol_str.replace(".FINAM", "")
-        return symbol_str
+        return to_finam_symbol(symbol_str)
 
     def _nautilus_bar_spec_to_finam_timeframe(self, bar_spec: BarSpecification) -> TimeFrame:
         """
@@ -549,10 +556,7 @@ class FinamDataClient(LiveMarketDataClient):
             try:
                 await self._instrument_provider.load_async(request.instrument_id)
             except Exception as exc:
-                self._log.error(
-                    f"Failed to load instrument {request.instrument_id}: {exc}",
-                    exc_info=True,
-                )
+                self._log.error(f"Failed to load instrument {request.instrument_id}: {exc}")
                 return
 
             instrument = self._instrument_provider.find(request.instrument_id)

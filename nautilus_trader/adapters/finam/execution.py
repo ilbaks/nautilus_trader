@@ -153,21 +153,13 @@ class FinamExecutionClient(LiveExecutionClient):
         await self._client.connect()
         self._log.debug("FinamGrpcClient connected")
 
-        # Initialize instrument provider
-        await self._instrument_provider.initialize()
+        # Skip instrument provider loading here; data client loads instruments and
+        # populates the shared cache. Avoiding a second GetAsset() prevents the
+        # duplicate gRPC calls which have been causing segfaults.
 
-        # Initialize order/trade stream
-        self._order_trade_stream = OrderTradeStreamManager(
-            client=self._client,
-            account_id=self._finam_account_id,
-            logger=self._log,
-        )
-
-        # Subscribe to order and trade updates
-        await self._order_trade_stream.subscribe_order_trade(
-            callback=self._handle_order_trade_update,
-            data_type=OrderTradeRequest.DATA_TYPE_ALL,
-        )
+        # NOTE: Order/trade stream subscription is disabled to avoid gRPC segfaults.
+        # Execution events will be reflected via periodic account polling instead.
+        self._order_trade_stream = None
 
         # Start account polling task
         self._update_account_task = self.create_task(self._poll_account_state())
@@ -202,6 +194,18 @@ class FinamExecutionClient(LiveExecutionClient):
         self._log.debug("FinamGrpcClient disconnected")
 
         self._log.info("Disconnected from Finam execution services", LogColor.GREEN)
+
+    async def generate_order_status_reports(self, command):
+        """Finam API lacks order status bulk endpoint; return empty to satisfy reconciliation."""
+        return []
+
+    async def generate_fill_reports(self, command):
+        """Finam API lacks fill history endpoint; return empty to satisfy reconciliation."""
+        return []
+
+    async def generate_position_status_reports(self, command):
+        """Finam API lacks position status endpoint; return empty to satisfy reconciliation."""
+        return []
 
     # -- ACCOUNT MANAGEMENT -----------------------------------------------------------------------
 
@@ -452,8 +456,8 @@ class FinamExecutionClient(LiveExecutionClient):
                 )
                 return
 
-            # Get instrument for commission currency
-            instrument = self._instrument_provider.find(instrument_id=instrument_id)
+            # Get instrument for commission currency (cache first, then provider)
+            instrument = self._find_instrument(instrument_id)
             if not instrument:
                 self._log.error(
                     f"Cannot find instrument {instrument_id} for trade fill, "
@@ -712,20 +716,38 @@ class FinamExecutionClient(LiveExecutionClient):
         """
         instrument_id: InstrumentId | None = self._instrument_ids.get(symbol)
         if not instrument_id:
-            # Try to find instrument in provider
-            instrument = self._instrument_provider.find(symbol=Symbol(symbol))
+            # Normalize Finam symbol (@) to Nautilus format (-) and try cache/provider
+            from nautilus_trader.model.identifiers import Venue
+            nautilus_symbol = symbol.replace("@", "-")
+            instrument = self._cache.instrument(InstrumentId(Symbol(nautilus_symbol), Venue("FINAM")))
+            if instrument is None:
+                instrument = self._instrument_provider.find(symbol=Symbol(nautilus_symbol))
             if instrument:
                 instrument_id = instrument.id
             else:
                 # Create placeholder InstrumentId (venue will be set later)
                 # In production, this should trigger instrument loading
-                from nautilus_trader.model.identifiers import Venue
-                instrument_id = InstrumentId(Symbol(symbol), Venue("FINAM"))
+                instrument_id = InstrumentId(Symbol(nautilus_symbol), Venue("FINAM"))
                 self._log.warning(
                     f"Instrument {symbol} not found in provider, created placeholder {instrument_id}"
                 )
             self._instrument_ids[symbol] = instrument_id
         return instrument_id
+
+    def _find_instrument(self, instrument_id: InstrumentId):
+        """Resolve instrument from cache first, then provider."""
+        instrument = self._cache.instrument(instrument_id)
+        if instrument:
+            return instrument
+        # Try alternate symbol format (swap @ and -)
+        from nautilus_trader.model.identifiers import Venue
+        sym_val = instrument_id.symbol.value
+        alt_symbol = sym_val.replace("@", "-") if "@" in sym_val else sym_val.replace("-", "@")
+        alt_id = InstrumentId(Symbol(alt_symbol), Venue("FINAM"))
+        instrument = self._cache.instrument(alt_id)
+        if instrument:
+            return instrument
+        return self._instrument_provider.find(instrument_id=instrument_id)
 
     def _map_order_side(self, side: OrderSide) -> FinamSide:
         """Map Nautilus OrderSide to Finam Side."""

@@ -37,8 +37,8 @@ from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.common.providers import InstrumentProvider
-from nautilus_trader.model.data import BarSpecification
-from nautilus_trader.model.enums import BarAggregation
+from nautilus_trader.data.messages import RequestInstrument
+from nautilus_trader.data.messages import RequestInstruments
 from nautilus_trader.data.messages import SubscribeBars
 from nautilus_trader.data.messages import SubscribeOrderBook
 from nautilus_trader.data.messages import SubscribeQuoteTicks
@@ -48,9 +48,12 @@ from nautilus_trader.data.messages import UnsubscribeOrderBook
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeTradeTicks
 from nautilus_trader.live.data_client import LiveMarketDataClient
+from nautilus_trader.model.data import BarSpecification
+from nautilus_trader.model.enums import BarAggregation
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.instruments import Instrument
 
 
 class FinamDataClient(LiveMarketDataClient):
@@ -132,6 +135,9 @@ class FinamDataClient(LiveMarketDataClient):
 
     async def _connect(self) -> None:
         """Connect to Finam gRPC API and start stream managers."""
+        # Ensure gRPC channel is established before instrument load/streams
+        await self._client.connect()
+
         # Initialize instrument provider
         await self._instrument_provider.initialize()
         self._send_all_instruments_to_data_engine()
@@ -518,3 +524,90 @@ class FinamDataClient(LiveMarketDataClient):
                 f"Unsupported bar aggregation: {agg}. "
                 "Finam supports: MINUTE, HOUR, DAY, WEEK, MONTH"
             )
+
+    # -- REQUESTS ---------------------------------------------------------------------------------
+
+    async def _request_instrument(self, request: RequestInstrument) -> None:
+        """
+        Handle ad-hoc instrument requests from the data engine.
+        """
+        if request.start is not None:
+            self._log.warning(
+                f"Requesting instrument {request.instrument_id} with specified `start` which has no effect",
+            )
+
+        if request.end is not None:
+            self._log.warning(
+                f"Requesting instrument {request.instrument_id} with specified `end` which has no effect",
+            )
+
+        instrument: Instrument | None = self._instrument_provider.find(request.instrument_id)
+        if instrument is None:
+            self._log.warning(
+                f"{request.instrument_id} not cached by Finam instrument provider, reloading...",
+            )
+            try:
+                await self._instrument_provider.load_async(request.instrument_id)
+            except Exception as exc:
+                self._log.error(
+                    f"Failed to load instrument {request.instrument_id}: {exc}",
+                    exc_info=True,
+                )
+                return
+
+            instrument = self._instrument_provider.find(request.instrument_id)
+
+        if instrument is None:
+            self._log.error(f"Cannot find instrument for {request.instrument_id}")
+            return
+
+        self._handle_instrument(
+            instrument,
+            request.id,
+            request.start,
+            request.end,
+            request.params,
+        )
+
+    async def _request_instruments(self, request: RequestInstruments) -> None:
+        """
+        Handle batch instrument requests (typically for catalog updates).
+        """
+        if request.start is not None:
+            self._log.warning(
+                f"Requesting instruments for {request.venue} with specified `start` which has no effect",
+            )
+
+        if request.end is not None:
+            self._log.warning(
+                f"Requesting instruments for {request.venue} with specified `end` which has no effect",
+            )
+
+        instruments = list(self._instrument_provider.get_all().values())
+        if not instruments:
+            self._log.info("Instrument provider cache empty, re-initializing...")
+            try:
+                await self._instrument_provider.initialize(reload=True)
+            except Exception as exc:
+                self._log.error(
+                    f"Failed to load instruments for {request.venue}: {exc}",
+                    exc_info=True,
+                )
+                return
+            instruments = list(self._instrument_provider.get_all().values())
+
+        if not instruments:
+            self._log.warning(
+                f"No instruments available for {request.venue}; nothing to return",
+            )
+            return
+
+        venue = request.venue or self.venue
+        self._handle_instruments(
+            venue,
+            instruments,
+            request.id,
+            request.start,
+            request.end,
+            request.params,
+        )

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//workspace/alphamax/task/03_nautilus_finam_adapter/docs/claude/finam_grpc/**)",
+      "Read(//workspace/alphamax/**)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "zen"
+  ]
+}

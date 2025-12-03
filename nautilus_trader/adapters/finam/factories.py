@@ -19,7 +19,6 @@ Factory functions for creating Finam adapter clients.
 
 import asyncio
 import os
-from functools import lru_cache
 
 from nautilus_trader.adapters.finam.common.constants import FINAM_VENUE
 from nautilus_trader.adapters.finam.config import FinamDataClientConfig
@@ -102,8 +101,7 @@ def get_account_id(account_id: str | None = None) -> str:
     return acc_id
 
 
-@lru_cache(1)
-def get_cached_finam_grpc_client(
+def get_finam_grpc_client(
     client_id: str,
     access_token: str,
     host: str = "api.finam.ru",
@@ -113,35 +111,7 @@ def get_cached_finam_grpc_client(
     rate_limit_window: float = 60.0,
     auto_refresh_token: bool = True,
 ) -> FinamGrpcClient:
-    """
-    Cache and return a Finam gRPC client with the given parameters.
-
-    If a cached client with matching parameters already exists, the cached client will be returned.
-
-    Parameters
-    ----------
-    client_id : str
-        The client ID for the gRPC client.
-    access_token : str
-        The Finam API access token (JWT).
-    host : str, default "api.finam.ru"
-        The gRPC server host address.
-    port : int, default 443
-        The gRPC server port.
-    use_ssl : bool, default True
-        If the client should use SSL/TLS.
-    rate_limit_requests : int, default 100
-        Maximum requests per time window.
-    rate_limit_window : float, default 60.0
-        Rate limit time window in seconds.
-    auto_refresh_token : bool, default True
-        If JWT token should be auto-refreshed.
-
-    Returns
-    -------
-    FinamGrpcClient
-
-    """
+    """Return a new Finam gRPC client (no shared cache to avoid channel reuse)."""
     return FinamGrpcClient(
         client_id=client_id,
         access_token=access_token,
@@ -154,34 +124,17 @@ def get_cached_finam_grpc_client(
     )
 
 
-@lru_cache(1)
-def get_cached_finam_instrument_provider(
+def get_finam_instrument_provider(
     client: FinamGrpcClient,
     clock: LiveClock,
     config: InstrumentProviderConfig,
+    account_id: str | None,
 ) -> FinamInstrumentProvider:
-    """
-    Cache and return a Finam instrument provider.
-
-    If a cached provider already exists, then that provider will be returned.
-
-    Parameters
-    ----------
-    client : FinamGrpcClient
-        The gRPC client for the instrument provider.
-    clock : LiveClock
-        The clock for the instrument provider.
-    config : InstrumentProviderConfig
-        The configuration for the instrument provider.
-
-    Returns
-    -------
-    FinamInstrumentProvider
-
-    """
+    """Return a new Finam instrument provider (no shared cache)."""
     return FinamInstrumentProvider(
         client=client,
         clock=clock,
+        account_id=account_id,
         config=config,
     )
 
@@ -232,8 +185,8 @@ class FinamLiveDataClientFactory(LiveDataClientFactory):
         access_token = get_access_token(config.access_token)
         account_id = get_account_id(config.account_id)
 
-        # Get gRPC client singleton
-        client = get_cached_finam_grpc_client(
+        # Get dedicated gRPC client (no cache/shared channel to avoid segfaults)
+        client = get_finam_grpc_client(
             client_id=config.client_id,
             access_token=access_token,
             host=config.host,
@@ -244,11 +197,12 @@ class FinamLiveDataClientFactory(LiveDataClientFactory):
             auto_refresh_token=config.auto_refresh_token,
         )
 
-        # Get instrument provider singleton
-        provider = get_cached_finam_instrument_provider(
+        # Get dedicated instrument provider
+        provider = get_finam_instrument_provider(
             client=client,
             clock=clock,
             config=config.instrument_provider,
+            account_id=account_id,
         )
 
         return FinamDataClient(
@@ -309,8 +263,8 @@ class FinamLiveExecClientFactory(LiveExecClientFactory):
         access_token = get_access_token(config.access_token)
         account_id = get_account_id(config.account_id)
 
-        # Get gRPC client singleton
-        client = get_cached_finam_grpc_client(
+        # Get dedicated gRPC client (no cache/shared channel to avoid segfaults)
+        client = get_finam_grpc_client(
             client_id=config.client_id,
             access_token=access_token,
             host=config.host,
@@ -321,11 +275,12 @@ class FinamLiveExecClientFactory(LiveExecClientFactory):
             auto_refresh_token=config.auto_refresh_token,
         )
 
-        # Get instrument provider singleton
-        provider = get_cached_finam_instrument_provider(
+        # Get dedicated instrument provider
+        provider = get_finam_instrument_provider(
             client=client,
             clock=clock,
             config=config.instrument_provider,
+            account_id=account_id,
         )
 
         return FinamExecutionClient(

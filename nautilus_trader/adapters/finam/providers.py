@@ -26,6 +26,7 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Quantity
+import os
 #%%
 
 class FinamInstrumentProvider(InstrumentProvider):
@@ -47,11 +48,13 @@ class FinamInstrumentProvider(InstrumentProvider):
         client: FinamGrpcClient,
         clock: Clock,
         config: InstrumentProviderConfig | None = None,
+        account_id: str | None = None,
     ) -> None:
         super().__init__(config=config)
 
         self._client = client
         self._clock = clock
+        self._account_id = account_id or os.getenv("FINAM_ACCOUNT_ID")
         
     async def load_all_async(
         self,
@@ -68,6 +71,9 @@ class FinamInstrumentProvider(InstrumentProvider):
         self._log.info("Loading all instruments from Finam gRPC API...")
 
         try:
+            # Ensure the gRPC client has an active channel before requesting metadata
+            await self._client.connect()
+
             # Call gRPC AssetsService.Assets()
             request = AssetsRequest()
             metadata = await self._client.get_metadata()
@@ -178,7 +184,7 @@ class FinamInstrumentProvider(InstrumentProvider):
 
                 # Call GetAsset() to get detailed specifications
                 # Note: account_id is required by Finam API
-                account_id = self._client._client_id  # Get from gRPC client
+                account_id = self._account_id or self._client._client_id
                 request = GetAssetRequest(symbol=finam_symbol, account_id=account_id)
                 specs_response = await self._client.assets.GetAsset(request, metadata=metadata)
 
